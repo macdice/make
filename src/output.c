@@ -172,6 +172,33 @@ static sync_handle_t sync_handle = -1;
 
 #define FD_NOT_EMPTY(_f) ((_f) != OUTPUT_NONE && lseek ((_f), 0, SEEK_END) > 0)
 
+#ifndef WINDOWS32
+/* If --sync-handle=<fd> is passed down, set it. */
+void
+record_sync_mutex(const char *s)
+{
+  sync_handle = strtol(s, NULL, 0);
+}
+
+/* Test if a descriptor can be used as a semaphore. */
+static int
+test_semaphore (int fd)
+{
+  static struct flock fl;
+
+  fl.l_type = F_WRLCK;
+  fl.l_whence = SEEK_SET;
+  fl.l_start = 0;
+  fl.l_len = 1;
+  if (fcntl (fd, F_SETLKW, &fl) < 0)
+    return 0;
+  fl.l_type = F_UNLCK;
+  if (fcntl (fd, F_SETLKW, &fl) < 0)
+    perror ("fcntl()");
+  return 1;
+}
+#endif
+
 /* Set up the sync handle.  Disables output_sync on error.  */
 static int
 sync_init (void)
@@ -196,18 +223,37 @@ sync_init (void)
     {
       struct stat stbuf_o, stbuf_e;
 
-      sync_handle = fileno (stdout);
       combined_output = (fstat (fileno (stdout), &stbuf_o) == 0
                          && fstat (fileno (stderr), &stbuf_e) == 0
                          && stbuf_o.st_dev == stbuf_e.st_dev
                          && stbuf_o.st_ino == stbuf_e.st_ino);
     }
-  else if (STREAM_OK (stderr))
-    sync_handle = fileno (stderr);
-  else
+  if (sync_handle == -1)
     {
-      perror_with_name ("output-sync suppressed: ", "stderr");
-      output_sync = 0;
+      int fd = -1;
+
+      if (STREAM_OK (stdout))
+	fd = fileno (stdout);
+      else if (STREAM_OK (stderr))
+	fd = fileno (stderr);
+      if (fd >= 0)
+	{
+	  /* Check if this fd supports locking.  If it doesn't we'll
+	     have to create our own lock file and pass the descriptor
+	     down to subprocesses. */
+	  if (test_semaphore(fd))
+	    sync_handle = fd;
+	  else
+	    {
+	      sync_handle = output_tmpfd();
+	      prepare_mutex_handle_string(sync_handle);
+	    }
+	}
+      else
+	{
+	  perror_with_name ("output-sync suppressed: ", "stderr");
+	  output_sync = 0;
+	}
     }
 #endif
 
